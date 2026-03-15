@@ -47,13 +47,33 @@ A Tiny Library node can be deployed on a VPS or single board computer. For the m
 - Tiny Library provides a seamless experience as the client or avatar switches from LPWAN to high speed noework connections
 - Some clients and workflows can use high speed data access
 
-## 
-
 # Architecture
 
-# Agents and Avatars
+## Agents and Avatars
+- Avatars are physical devices or client software that a person uses to interact with Agents. 
+- An Avatar connects to a TinyLibrary node using secure pairing, using ECDH keys
+- A person, group, or role uses a workflow layer key pair to connect to a data set in the Content Bank
+- An Agent uses tools to send and retrieve messages to communicate with an Avatar
+- An Avatar has a default agent that handles the communicaiton endpoint and keeps the interaction history
+- An Avatar Agent may spawn sub-agents for specialized tasks and tools within a workflow
 
-# Tools and data models
+## Librarian
+- There is a base Agent, the Librarian, that can access the content bank for management and administrative tasks
+- The Librarian agent is the default interface for Tiny Library and handles the front end for connections and handles the back end for Content Bank access
+- The Librarian works primarily with local context for people, groups, or roles, and has access to information in the Content Bank that is proxied for access
+- Each person, group, or role has a their own private interactions with the Librarian
+- The Librarian may provide a completely separate context for each person, group, or role
 
-# Content Bank
+## Tools and data models
+- Tools and data models work together to provide a consistent interface for Agents to use the Content Bank
+- Data models are based on RDF with SHACL constraints that determine the shape and types of metadata in the content bank
+- Tools can create, read, update, and delete data in the content bank and can execute other operations like fetching external URLs
+- Tools and data models are specialized to work with particular workflows 
+- Agents are scoped to a set of tools and data models 
+
+## Content Bank
+- Content bank provides application and administative storage for Tiny Library
+- Content Bank is divided into slices which are bound to people, groups, or roles using authorization and secure pairing
+- The atomic unit of storage in Content Bank is an Object, each Object consisting of an RDF subgraph with descriptive metadata, and optionally opaque binary objects bound to the metadata that can be handled by content-specific tools or handlers specified by the Object metadata
+- Content Bank can replicate object data to other Tiny Library nodes for redundancy, and can chunk and replicate the opaque data across multiple TIny Library nodes for improved bandwidth and redundancy
 
