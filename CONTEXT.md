@@ -80,21 +80,99 @@ A 13-page professionally typeset PDF of the improved PRD with: title page, table
 - **Networking layers:** IP network (primary) + Meshtastic LPWAN (fallback) + Donkey Net (last-resort store-and-forward)
 - **Content federation:** Secure proxy model where source generates key pairs and controls access
 - **Scope hierarchy:** Individual > Family > Group > Community with layered permissions
+- **License:** ✅ AGPLv3 — decided 2026-03-15. Rationale: federated community infrastructure; network use clause keeps modifications in the commons; aligns with target community (hackers, privacy advocates, rural access projects). Dual licensing option remains open if commercial embedding becomes relevant.
+- **ContentBank distribution model:** ✅ Each node holds a complete copy of its ContentBank; distribution is simple replication only. No sharding required. Inter-node content exposure via a proxy mechanism (selective content sharing, not aggregated global view). Decided 2026-03-15.
+- **Database stack:** ✅ PostgreSQL + TimescaleDB + Apache AGE + IPFS — decided 2026-03-15.
+  - PostgreSQL: primary structured storage, one instance per node
+  - TimescaleDB extension: time-sequenced records (events, telemetry, logs)
+  - Apache AGE extension: knowledge graph / cross-Capability indexing (openCypher queries)
+  - IPFS: blob storage; CIDs stored as references in Postgres
+  - Rationale: proven ARM/RPi deployment, no distributed coordination overhead (complete-copy model eliminates need for native distributed DB), rich ecosystem, Capability schemas map cleanly to Postgres schemas
+  - Alternatives considered and rejected: CouchDB (good WAN replication but no graph, weak time-series), ClickHouse (excellent time-series but OLAP not OLTP, no graph, poor WAN distribution), SurrealDB (right shape but TiKV clustering immature for WAN/RPi topology, version stability concerns)
+- **Capability architecture:** ✅ Horizontal TinyLibrary functionality is partitioned into Capabilities (Calendar, Inventory, Have/Need, etc.). Each Capability is a self-contained plug-in bundle. Decided 2026-03-15.
+- **Schema layer design:** ✅ Two-format approach — JSON Schema for Tool interfaces, SHACL for ContentBank data model. Decided 2026-03-15.
 
 ### Open / TBD
 
-- **License selection:** AGPLv3 vs Apache 2.0 — needs decision before public repository
-- **Governance model:** To be established as community grows
-- **Data corruption recovery granularity:** What level of the Content Bank controls audit trail and versioning policies
-- **Knowledge Graph implementation:** The original outline mentions cross-referenced data and dynamic linkage — the PRD doesn't yet detail how the knowledge graph layer interacts with the Content Bank's RDF objects
-- **Presence system:** Mentioned in the original outline but not elaborated in the PRD — how does presence work across LPWAN and Library Mesh?
-- **Filters and Mashups:** External data subscriptions, timeline views, and local inferences are in the outline but not yet specified as requirements
-- **Have and Want system:** The Craigslist-inspired exchange mechanism from the original outline needs its own requirements section
-- **Browser link tracker plugin:** Mentioned in the original outline under Organizer — not yet specified
-- **Personal Object concept:** Referenced as the foundation for the Organizer — needs definition and relationship to Content Bank Objects
+- **Language stack:** Not yet decided. Go is the leading candidate (single binary, ARM cross-compilation, go-ipfs ecosystem). Python is fallback for faster prototyping. Decision pending.
+- **GitHub org setup:** TinyLibraryFramework org not yet created; gh CLI not authenticated.
+- **Governance model:** To be established as community grows.
+- **Data corruption recovery granularity:** What level of ContentBank controls audit trail and versioning policies.
+- **Presence system:** Mentioned in the original outline but not elaborated — how does presence work across LPWAN and Library Mesh?
+- **Filters and Mashups:** External data subscriptions, timeline views, local inferences — not yet specified as requirements.
+- **Have and Want system:** Craigslist-inspired exchange mechanism needs its own requirements section.
+- **Browser link tracker plugin:** Under Organizer in original outline — not yet specified.
+- **Personal Object concept:** Foundation for the Organizer — needs definition and relationship to ContentBank Objects.
+- **JSON Schema vs SHACL derivation:** Whether to derive JSON Schema tool definitions from SHACL (single source of truth) or maintain both independently (simpler, chosen for now). Revisit when tooling matures.
+
+---
+
+## Architecture Session — 2026-03-15
+
+### Diagrams Reviewed
+
+Three architecture diagrams are in `images/`:
+
+**TinyLibraryArchitecture.pdf** — High-level system architecture (4 layers):
+1. User Layer: Avatar Device or App
+2. Network Layer: Networks (IP, Meshtastic, etc.)
+3. Agent Layer: Agents (orchestration/intelligence)
+4. Tool + Storage Layer: Tools (modular capabilities) → ContentBank (database)
+- Agents never access ContentBank directly — always through Tools
+- Clean separation: UI / network / intelligence / execution / data
+
+**TinyLibraryAgentStack.pdf** — Agent stack internals (3 layers, bookended by Person/Intention → Information/Action):
+1. **Avatar** — "How to interact with the person" (personality, communication style, intent parsing)
+2. **Workflow** — "Planning and Provisioning" (orchestration, task decomposition, resource planning)
+3. **Capability** — "Access information and take action" (tool execution, data access, side effects)
+
+**TinyLibraryCapability.pdf** — Capability as plug-in unit:
+- Dashed-border bundle: **Agent** (specialization + tool knowledge) + **Tools** (content access, index, aggregation) + **Data Model** (formats for stored information)
+- ContentBank sits *outside* the dashed group — it is shared infrastructure, not owned by any Capability
+- Plug-in is portable and swappable; ContentBank persists independently
+
+### Capability Architecture
+
+TinyLibrary's horizontal functionality is partitioned into Capabilities. Examples: Calendar, Inventory, Have/Need, Contacts, Tasks, Notifications.
+
+Each Capability is a plug-in bundle with four artifacts:
+
+```
+capability/
+  calendar/
+    manifest.json      ← Capability identity + metadata
+    tools.json         ← JSON Schema tool definitions (LLM function-calling compatible)
+    shapes.ttl         ← SHACL shapes for ContentBank RDF objects
+    agent-prompt.md    ← Agent specialization context
+```
+
+In PostgreSQL, each Capability maps to its own schema (e.g., `calendar`, `inventory`, `have_need`). ContentBank core objects live in a shared `core` schema. Tools encapsulate all SQL — agents never query the database directly.
+
+### Schema Layer Design
+
+Two schema formats serve different concerns:
+
+| Layer | Format | Purpose |
+|-------|--------|---------|
+| Agent ↔ Tool | JSON Schema (`tools.json`) | Tool interface definitions; maps 1:1 to Anthropic/OpenAI function calling format; enables dynamic Capability discovery by Workflow layer |
+| Tool ↔ ContentBank | SHACL (`shapes.ttl`) | RDF object shape validation; enforced before any write reaches storage; defines RDF types/properties used by knowledge graph |
+
+**Key properties of this design:**
+- Dynamic Capability discovery: Workflow loads manifests at runtime, no hardcoded tool knowledge
+- LLM compatibility: tools.json feeds directly into LLM tool-use APIs without transformation
+- Validated writes: SHACL validation runs before every ContentBank write
+- Knowledge graph grounding: SHACL shapes define the RDF vocabulary that AGE traverses cross-Capability
+
+---
 
 ## Notes for Continued Development
 
 The original outline (Tiny Library.md) contains several concepts not yet fully captured in the PRD: the Knowledge Graph, Presence system, Filters/Mashups, Have and Want exchange, and the browser link tracker. These should be developed into requirements sections as the project progresses.
 
 The four use case scenarios in the improved PRD were designed to exercise as many requirements as possible and can serve as acceptance criteria seeds for future development sprints.
+
+**Immediate next steps:**
+1. Decide language stack (Go vs Python)
+2. Authenticate `gh` CLI and create TinyLibraryFramework GitHub org
+3. Sketch ContentBank core schema (Postgres) and model Calendar + Inventory Capabilities against it
+4. Define the replication/proxy mechanism for inter-node content sharing
