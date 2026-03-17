@@ -171,8 +171,173 @@ The original outline (Tiny Library.md) contains several concepts not yet fully c
 
 The four use case scenarios in the improved PRD were designed to exercise as many requirements as possible and can serve as acceptance criteria seeds for future development sprints.
 
-**Immediate next steps:**
-1. Decide language stack (Go vs Python)
-2. Authenticate `gh` CLI and create TinyLibraryFramework GitHub org
-3. Sketch ContentBank core schema (Postgres) and model Calendar + Inventory Capabilities against it
-4. Define the replication/proxy mechanism for inter-node content sharing
+**Immediate next steps (updated 2026-03-16 — all prior steps complete):**
+See "Implementation Session — 2026-03-16" section below for current state.
+
+---
+
+## Implementation Session — 2026-03-16
+
+All architecture decisions from the prior session were implemented. ContentBank v0.1 is complete and pushed to GitHub.
+
+### Decisions Made
+
+- **Language stack:** ✅ Python throughout (core API + tools). Memory footprint argument for Go was neutralized — dominant consumers are PostgreSQL buffer cache and IPFS, not the language runtime. Python wins on pySHACL/rdflib ecosystem and single-runtime deployment.
+- **SHACL as SoT:** ✅ Confirmed. SHACL is the single source of truth for the ContentBank data model. JSON Schema tool definitions are generated from SHACL at build time via `tools/schema_gen/generate.py`.
+- **Schema annotation vocabulary:** ✅ `annotations.ttl` defines `tl:apiAccess`, `tl:apiMutable`, `tl:apiListFilterable`, `tl:apiSortable`, `tl:apiPaginates`, `tl:apiOperations`, `tl:apiDescription`, `tl:apiExample` — applied to shapes, drive generation.
+- **Multi-tenancy:** ✅ Per-deployment ContentBank with multiple co-resident agents. `tl:owner` (Agent or ScopeGroup) + `tl:scope` (Individual/ScopeGroup/Community) provide logical isolation. Multiple individuals can store private Individual-scoped objects in the same ContentBank.
+- **Ownership model:** ✅ Ownership (Agent or ScopeGroup) governs storage allocation and write rights. Scope governs read visibility. Scope must be equal to or broader than ownership — enforced by `tl:OwnerScopeCompatibilityConstraint` (SPARQL).
+- **ScopeGroup:** ✅ Replaces bare `tl:Family`/`tl:Group` named individuals. Each deployment creates `tl:ScopeGroup` instances (`urn:cb:scope_group:{uuid}`) with explicit `tl:member` lists. `tl:Individual` and `tl:Community` remain as singletons.
+- **Object ID scheme:** ✅ `urn:cb:{typeSlug}:{uuid}` — stable UUID identity, type slug enables prefix-scan filtering, `tl:contentHash` tracks current state for replication.
+- **Blob model:** ✅ Objects may have zero or more `tl:BlobAttachment` nodes. Each has a CID, MIME type, role (primary/thumbnail/raw/transcript/preview), optional byte size and SHA-256. Blobs fetched from IPFS separately.
+- **Replication:** ✅ Complete-copy per node, peer-to-peer pull, no central coordinator. Per-node monotonic sequence numbers. ScopeGroup changes carry causal dependency `(dep_node, dep_seq)` — receiving nodes hold dependent writes until dependency is present. Last-write-wins with `(updated_at, sourceNode)` tiebreaker.
+- **Sharing proxy:** ✅ Purpose-specific ECDH key pairs per sharing relationship. Pull model with optional subscription (push-on-change). Object-granularity explicit list. Revocation sets `tl:revokedAt` (soft delete, audit trail preserved).
+- **GitHub org:** ✅ `mjkoster/TinyLibraryFramework`. SSH auth configured. All four repos wired and pushing.
+
+### SHACL Shapes Written (ContentBank/shapes/)
+
+```
+shapes/
+  core/
+    core.ttl          — Object, Agent, Node, BlobAttachment, Scope,
+                        ScopeGroup, ScopeTransitivityConstraint,
+                        OwnerScopeCompatibilityConstraint
+    annotations.ttl   — API annotation vocabulary
+    sharing.ttl       — SharingGrant, SharingSet (future placeholder)
+    replication.ttl   — ReplicationPeer, protocol notes
+  capability/
+    calendar/shapes.ttl   — CalendarEvent, RecurrenceRule, Reminder
+    inventory/shapes.ttl  — InventoryItem, InventoryCollection, Location
+```
+
+### ContentBank Implementation (ContentBank/src/contentbank/)
+
+**Full API surface — 40+ routes:**
+
+```
+Auth
+  POST /api/v1/auth/agents           register agent + public key
+  POST /api/v1/auth/challenge        get nonce
+  POST /api/v1/auth/token            sign nonce → JWT
+
+Agents
+  GET  /api/v1/agents/me
+  GET  /api/v1/agents/{id}
+  PATCH /api/v1/agents/me
+
+Groups
+  POST   /api/v1/groups
+  GET    /api/v1/groups/{id}
+  PATCH  /api/v1/groups/{id}
+  POST   /api/v1/groups/{id}/members
+  DELETE /api/v1/groups/{id}/members/{agent_id}
+  DELETE /api/v1/groups/{id}
+
+Objects (generic)
+  POST   /api/v1/objects/
+  GET    /api/v1/objects/{id}
+  PATCH  /api/v1/objects/{id}
+  DELETE /api/v1/objects/{id}
+  GET    /api/v1/objects/
+
+Calendar
+  POST/GET/PATCH/DELETE /api/v1/calendar/events/{id}
+  GET /api/v1/calendar/events
+
+Inventory
+  POST/GET/PATCH/DELETE /api/v1/inventory/items/{id}
+  GET /api/v1/inventory/items
+  POST/GET/PATCH/DELETE /api/v1/inventory/collections/{id}
+  GET /api/v1/inventory/collections
+
+Replication
+  GET /api/v1/replication/sync
+
+Proxy
+  POST /api/v1/proxy/grants
+  GET  /api/v1/proxy/grants/{id}
+  POST /api/v1/proxy/grants/{id}/objects
+  POST /api/v1/proxy/grants/{id}/revoke
+  GET  /api/v1/proxy/objects/{id}
+  POST /api/v1/proxy/subscriptions
+```
+
+**Module structure:**
+```
+src/contentbank/
+  config.py               — pydantic-settings, CB_ env vars
+  main.py                 — FastAPI app, lifespan (shapes + replication worker)
+  cli.py                  — contentbank keygen / serve
+  auth/
+    keys.py               — P-256 key gen, ECDSA sign/verify, PEM serialization
+    tokens.py             — JWT issue/verify (agent, node, grant types)
+    dependencies.py       — require_agent, require_node FastAPI deps
+  core/
+    validation.py         — pySHACL validation, shapes cached at startup
+    models.py             — Pydantic API models
+    storage/objects.py    — CRUD: create/get/update/delete/list
+                            SHACL validation on write, scope enforcement on read
+                            replication log append on every write
+  db/
+    database.py           — SQLAlchemy async engine, get_db dep
+    models.py             — ORM: Agent, ScopeGroup, Object, BlobAttachment,
+                            SharingGrant, ReplicationPeer, ReplicationLog,
+                            ReplicationPeerState
+  api/routes/
+    auth.py               — challenge/response auth + agent registration
+    agents.py             — agent profile + ScopeGroup management
+    objects.py            — generic object CRUD
+    replication.py        — /sync endpoint (node JWT auth)
+    proxy.py              — grant management + recipient proxy
+  capabilities/
+    calendar/
+      models.py           — CalendarEvent, RecurrenceRule, Reminder Pydantic models
+      routes.py           — Calendar CRUD routes
+    inventory/
+      models.py           — InventoryItem, InventoryCollection, Location models
+      routes.py           — Inventory CRUD routes
+  replication/
+    sync.py               — get_events_since, apply_events, causal hold queue,
+                            pull_from_peer (httpx), LWW conflict resolution
+    worker.py             — asyncio background worker, per-peer interval tracking
+  sharing/
+    grants.py             — create_grant, revoke_grant, validate_grant_for_object,
+                            add_objects_to_grant
+tools/
+  schema_gen/generate.py  — SHACL → JSON Schema generator (rdflib)
+alembic/
+  versions/0001_initial_schema.py — full initial DB migration
+```
+
+**Auth flow:**
+1. `contentbank keygen` → generates P-256 node key pair, prints `.env` vars
+2. Agent: `POST /auth/agents` with public key → gets `agent_id`
+3. Agent: `POST /auth/challenge` → gets nonce
+4. Agent: signs nonce with ECDSA P-256 private key
+5. Agent: `POST /auth/token` → gets Bearer JWT (signed by node)
+6. All subsequent requests: `Authorization: Bearer {JWT}`
+
+**To run:**
+```bash
+contentbank keygen          # generate node key pair
+# Set CB_NODE_ID, CB_NODE_PUBLIC_KEY, CB_NODE_PRIVATE_KEY in .env
+alembic upgrade head        # provision Postgres schema
+contentbank serve           # start API server
+```
+
+### Next Development Areas
+
+- **Have/Need Capability** — Craigslist-inspired exchange mechanism (mentioned in original outline, not yet specified)
+- **Contacts Capability** — Personal Object / FOAT concept; relationship to ContentBank Objects
+- **Presence system** — Cross-LPWAN and Library Mesh presence (not yet specified)
+- **Filters and Mashups** — External data subscriptions, timeline views, local inferences
+- **Browser link tracker plugin** — Under Organizer in original outline
+- **SharingSet** — Query-based bulk sharing (tl:SharingSet placeholder in shapes, not implemented)
+- **Replication push** — Async push on write (currently pull-only)
+- **Conflict flagging** — Surface conflicted objects for agent-mediated resolution
+- **JWT → ECDH channel** — Upgrade from JWT auth to full ECDH encrypted channels
+- **AGE knowledge graph** — Cross-Capability graph queries not yet implemented
+- **TimescaleDB** — Time-series Capability (telemetry) not yet implemented
+- **IPFS integration** — Kubo HTTP API client for blob storage not yet wired
+- **Tool definitions** — `tools.json` Capability manifests not yet generated from shapes
+- **SmartCapture / glyph** — Other TinyLibraryFramework repos not yet started
